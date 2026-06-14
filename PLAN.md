@@ -105,7 +105,10 @@ ID, not inline them.
 
 ## First Milestone
 
-The first milestone is not final polish. It is a usable vertical slice:
+The first milestone is not final polish. It is a usable vertical slice. The
+current scaffold has the editor shell, graph, timeline, media rail, inspector,
+preview placeholder, project model, and local API stubs. The next step is to
+replace placeholders with real import, analysis, render, and project I/O.
 
 1. Create/import a project.
 2. Add an audio track and media assets.
@@ -138,4 +141,3 @@ The first milestone is not final polish. It is a usable vertical slice:
 - Cloud accounts or hosted rendering.
 - Full TouchDesigner-style low-level math/operator/shader graph.
 - Full nonlinear video editing with many conventional clip tracks.
-

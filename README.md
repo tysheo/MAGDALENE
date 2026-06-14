@@ -11,16 +11,15 @@ visuals through a graph and timeline.
 
 ## Current Status
 
-This repository is in planning/scaffold state. The first implementation target
-is a local editor with:
+This repository now contains the first local editor scaffold:
 
-- node graph for visual logic
-- audio timeline with waveform, beats, stems, sections, lyrics, and markers
-- media library for images, video, audio, and text
-- preview viewport
-- inspector for node and marker parameters
-- `.magdalene` project save/load
-- final MP4 export
+- React + TypeScript editor shell
+- React Flow node graph
+- audio timeline mock with waveform, beat/stem/section/lyric lanes
+- media library for image, video, audio, and text sources
+- preview viewport placeholder
+- inspector and node palette
+- local Node API for health, default project, save, and export stubs
 
 Read:
 
@@ -28,3 +27,20 @@ Read:
 - [CONTEXT.md](CONTEXT.md) for product positioning and relationship to FOUND /
   FOOTAGE
 
+## Run
+
+```bash
+npm install
+npm run dev
+```
+
+Open `http://localhost:5177`.
+
+The local API runs on `http://localhost:5178` and Vite proxies `/api/*` to it.
+
+## Check
+
+```bash
+npm run check
+npm run build
+```
