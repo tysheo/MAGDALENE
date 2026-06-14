@@ -12,31 +12,23 @@ import {
   type Edge,
   type NodeProps,
 } from '@xyflow/react'
-import {
-  AudioLines,
-  Boxes,
-  CircleDot,
-  Download,
-  FileAudio,
-  FileImage,
-  FileText,
-  FileVideo,
-  FolderOpen,
-  GitBranch,
-  Play,
-  Save,
-  Sparkles,
-} from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { MagdaleneFlowNode, MagdaleneProject, MediaItem, ServerStatus, TimelineLane } from './model/project'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { MagdaleneFlowNode, MagdaleneProject, TimelineLane } from './model/project'
+import { api } from './api'
+import { PreviewCanvas } from './preview/PreviewCanvas'
+import { AudioEngine } from '@engine/audio/AudioEngine'
+import { activeLyricIndex, parseLrc, type LyricLine } from '@engine/audio/lrc'
+import type { AudioSource, FootageEngine, FootageState } from '@engine/footage/FootageEngine'
+import type { Runtime } from '@engine/runtime/Runtime'
+import type { RuntimeMarker } from '@engine/runtime/types'
+import { buildRuntime, NODE_LIBRARY } from '@engine/runtime/nodes/library'
 
-const API_BASE = import.meta.env.VITE_API_BASE || ''
+type ServerStatus = 'checking' | 'ready' | 'offline'
 
-function mediaIcon(type: MediaItem['type']) {
-  if (type === 'audio') return <FileAudio size={16} />
-  if (type === 'video') return <FileVideo size={16} />
-  if (type === 'text') return <FileText size={16} />
-  return <FileImage size={16} />
+type LoadedTrack = {
+  name: string
+  duration: number
+  peaks: Float32Array
 }
 
 function MagdaleneNode({ data, selected }: NodeProps<MagdaleneFlowNode>) {
@@ -45,7 +37,7 @@ function MagdaleneNode({ data, selected }: NodeProps<MagdaleneFlowNode>) {
     <div className={`m-node m-node--${node.tone} ${selected ? 'is-selected' : ''}`}>
       <Handle type="target" position={Position.Left} />
       <div className="m-node__cap">
-        <CircleDot size={13} />
+        <span className="m-node__dot" />
         <span>{node.label}</span>
       </div>
       <div className="m-node__body">{node.subtitle}</div>
@@ -56,35 +48,105 @@ function MagdaleneNode({ data, selected }: NodeProps<MagdaleneFlowNode>) {
 
 const nodeTypes = { magdalene: MagdaleneNode }
 
-function Timeline({ project }: { project: MagdaleneProject }) {
+function StageLyrics({ lines, time }: { lines: LyricLine[]; time: number }) {
+  if (!lines.length) return null
+  const idx = activeLyricIndex(lines, time)
+  const prev = idx > 0 ? lines[idx - 1]?.text : ''
+  const cur = idx >= 0 ? lines[idx]?.text : ''
+  const next = lines[idx + 1]?.text ?? ''
+  return (
+    <div className="stage-lyrics">
+      <span className="stage-lyrics__line stage-lyrics__line--ghost">{prev}</span>
+      <span className="stage-lyrics__line stage-lyrics__line--now">{cur || '—'}</span>
+      <span className="stage-lyrics__line stage-lyrics__line--ghost">{next}</span>
+    </div>
+  )
+}
+
+function Timeline({
+  project,
+  track,
+  time,
+  onSeek,
+  onMarkerMove,
+  onMarkerTrigger,
+}: {
+  project: MagdaleneProject
+  track: LoadedTrack | null
+  time: number
+  onSeek: (t: number) => void
+  onMarkerMove: (id: string, time: number) => void
+  onMarkerTrigger: (target: string, value: string | number | boolean) => void
+}) {
+  const duration = track?.duration ?? project.timeline.duration
+  const peaks = track?.peaks
+  const playheadPct = Math.min(100, (time / duration) * 100)
+  const markersRef = useRef<HTMLDivElement | null>(null)
+
+  const seek = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const frac = (e.clientX - rect.left) / rect.width
+    onSeek(Math.max(0, Math.min(1, frac)) * duration)
+  }
+
+  // Drag a marker to retime its trigger; a plain click fires it now.
+  const onMarkerDown = (e: React.PointerEvent, markerId: string, target: string, value: string | number | boolean) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const container = markersRef.current
+    if (!container) return
+    const rect = container.getBoundingClientRect()
+    let dragged = false
+    const move = (ev: PointerEvent) => {
+      dragged = true
+      const frac = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width))
+      onMarkerMove(markerId, frac * duration)
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      if (!dragged) onMarkerTrigger(target, value)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   return (
     <section className="timeline">
       <div className="timeline__ruler">
-        <span>00:00</span>
+        <span>N° 04 // TIMELINE</span>
         <span>{project.timeline.bpm} BPM</span>
-        <span>{formatTime(project.timeline.duration)}</span>
+        <span>
+          {formatTime(time)} / {formatTime(duration)}
+        </span>
       </div>
-      <div className="timeline__wave" aria-label="waveform">
-        {Array.from({ length: 96 }).map((_, i) => (
-          <span key={i} style={{ height: `${24 + Math.abs(Math.sin(i * 0.45) * 52)}%` }} />
-        ))}
-      </div>
-      <div className="timeline__lanes">
-        {project.timeline.lanes.map((lane) => (
-          <TimelineLaneRow key={lane.id} lane={lane} duration={project.timeline.duration} />
-        ))}
-      </div>
-      <div className="timeline__markers">
-        {project.timeline.markers.map((marker) => (
-          <button
-            key={marker.id}
-            className="marker"
-            style={{ left: `${(marker.time / project.timeline.duration) * 100}%` }}
-            title={`${marker.label} -> ${marker.target}`}
-          >
-            {marker.label}
-          </button>
-        ))}
+      <div className="timeline__body">
+        <div className="timeline__wave" aria-label="waveform" onClick={seek}>
+          {peaks
+            ? Array.from(peaks).map((p, i) => <span key={i} style={{ height: `${6 + p * 90}%` }} />)
+            : Array.from({ length: 120 }).map((_, i) => (
+                <span key={i} style={{ height: `${18 + Math.abs(Math.sin(i * 0.42) * 64)}%` }} />
+              ))}
+          <div className="timeline__playhead" style={{ left: `${playheadPct}%` }} />
+        </div>
+        <div className="timeline__lanes">
+          {project.timeline.lanes.map((lane) => (
+            <TimelineLaneRow key={lane.id} lane={lane} duration={project.timeline.duration} />
+          ))}
+        </div>
+        <div className="timeline__markers" ref={markersRef}>
+          {project.timeline.markers.map((marker) => (
+            <button
+              key={marker.id}
+              className="marker"
+              style={{ left: `${(marker.time / duration) * 100}%` }}
+              title={`${marker.label} -> ${marker.target} = ${marker.value} (drag to retime, click to fire)`}
+              onPointerDown={(e) => onMarkerDown(e, marker.id, marker.target, marker.value)}
+            >
+              {marker.label}
+            </button>
+          ))}
+        </div>
       </div>
     </section>
   )
@@ -107,44 +169,61 @@ function TimelineLaneRow({ lane, duration }: { lane: TimelineLane; duration: num
   )
 }
 
-function Preview({ project, serverStatus }: { project: MagdaleneProject; serverStatus: ServerStatus }) {
-  const marker = project.timeline.markers[1]
-  return (
-    <section className="preview">
-      <div className="preview__frame">
-        <div className="preview__grid" />
-        <div className="preview__cell preview__cell--a" />
-        <div className="preview__cell preview__cell--b" />
-        <div className="preview__cell preview__cell--c" />
-        <div className="preview__text">MAGDALENE</div>
-      </div>
-      <div className="preview__meta">
-        <span>{serverStatus === 'ready' ? 'ENGINE READY' : 'ENGINE CHECK'}</span>
-        <span>{marker.label} / {marker.target}</span>
-      </div>
-    </section>
-  )
-}
-
 function formatTime(seconds: number) {
-  const min = Math.floor(seconds / 60)
-  const sec = Math.floor(seconds % 60)
+  const safe = Number.isFinite(seconds) ? seconds : 0
+  const min = Math.floor(safe / 60)
+  const sec = Math.floor(safe % 60)
   return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
 export function App() {
+  const audioRef = useRef<AudioEngine | null>(null)
+  if (!audioRef.current) audioRef.current = new AudioEngine()
+  const audio = audioRef.current
+
   const [project, setProject] = useState<MagdaleneProject | null>(null)
   const [serverStatus, setServerStatus] = useState<ServerStatus>('checking')
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [nodes, setNodes, onNodesChange] = useNodesState<MagdaleneFlowNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
 
+  const [track, setTrack] = useState<LoadedTrack | null>(null)
+  const [lyrics, setLyrics] = useState<LyricLine[]>([])
+  const [playing, setPlaying] = useState(false)
+  const [time, setTime] = useState(0)
+
+  const engineRef = useRef<FootageEngine | null>(null)
+  const [footage, setFootage] = useState<FootageState | null>(null)
+  const [archiveCount, setArchiveCount] = useState(0)
+
+  // Adapter so the FOUND/FOOTAGE engine reads levels + time from the same shared
+  // AudioEngine that drives the timeline — one audio pipeline, no double output.
+  const footageAudio = useMemo<AudioSource>(
+    () => ({
+      currentTime: () => audio.currentTime,
+      update: () => {
+        const l = audio.getLevels()
+        return { bass: l.bass, mid: l.mid, high: l.high, impact: l.beat }
+      },
+      duration: () => audio.duration,
+    }),
+    [audio],
+  )
+
+  const runtimeRef = useRef<Runtime | null>(null)
+  if (!runtimeRef.current) runtimeRef.current = buildRuntime()
+  const [graphMode, setGraphMode] = useState(false)
+
+  // Latest markers in RuntimeMarker shape — the engine pulls these each frame.
+  const markersRef = useRef<RuntimeMarker[]>([])
+
   useEffect(() => {
-    fetch(`${API_BASE}/api/health`)
-      .then((res) => res.ok ? setServerStatus('ready') : setServerStatus('offline'))
+    api
+      .health()
+      .then((res) => setServerStatus(res.ok ? 'ready' : 'offline'))
       .catch(() => setServerStatus('offline'))
-    fetch(`${API_BASE}/api/project/default`)
-      .then((res) => res.json())
+    api
+      .getDefaultProject()
       .then((data: MagdaleneProject) => {
         setProject(data)
         setNodes(data.graph.nodes)
@@ -159,148 +238,414 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges])
 
+  // Keep the runtime graph in sync with the editor graph so live param edits and
+  // wiring changes drive the preview on the next frame.
+  useEffect(() => {
+    const rt = runtimeRef.current
+    if (!rt) return
+    const rnodes = nodes
+      .filter((n) => n.data.nodeType)
+      .map((n) => ({ id: n.id, type: n.data.nodeType as string, params: n.data.params ?? {} }))
+    const redges = edges.map((e) => ({
+      source: e.source,
+      sourceHandle: e.sourceHandle ?? null,
+      target: e.target,
+      targetHandle: e.targetHandle ?? null,
+    }))
+    rt.setGraph(rnodes, redges)
+  }, [nodes, edges])
+
+  useEffect(() => {
+    markersRef.current = project
+      ? project.timeline.markers.map((m) => ({ id: m.id, time: m.time, target: m.target, value: m.value }))
+      : []
+  }, [project])
+
+  // Poll playback position while playing (10fps) for the clock + playhead. The
+  // visualiser reacts at full framerate independently via AudioEngine.getLevels.
+  useEffect(() => {
+    if (!playing) return
+    const id = setInterval(() => {
+      setTime(audio.currentTime)
+      if (!audio.isPlaying) setPlaying(false)
+    }, 100)
+    return () => clearInterval(id)
+  }, [playing, audio])
+
   const selectedNode = useMemo(() => nodes.find((node) => node.id === selectedNodeId), [nodes, selectedNodeId])
+  const selectedEval = useMemo(
+    () => (selectedNode?.data.nodeType ? runtimeRef.current?.getEvaluator(selectedNode.data.nodeType) ?? null : null),
+    [selectedNode],
+  )
 
   const onConnect = useCallback(
     (connection: Connection) => setEdges((eds) => addEdge({ ...connection, animated: true }, eds)),
     [setEdges],
   )
 
+  const setNodeParam = useCallback(
+    (id: string, name: string, value: number | string | boolean) => {
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === id ? { ...n, data: { ...n.data, params: { ...(n.data.params ?? {}), [name]: value } } } : n,
+        ),
+      )
+    },
+    [setNodes],
+  )
+
+  const toggleGraphMode = () => {
+    const next = !graphMode
+    setGraphMode(next)
+    engineRef.current?.setMode(next ? 'driven' : 'auto')
+  }
+
+  const moveMarker = (id: string, time: number) => {
+    setProject((p) =>
+      p
+        ? { ...p, timeline: { ...p.timeline, markers: p.timeline.markers.map((m) => (m.id === id ? { ...m, time } : m)) } }
+        : p,
+    )
+  }
+
+  const triggerMarker = (target: string, value: string | number | boolean) => {
+    const e = engineRef.current
+    if (!e) return
+    if (target === 'doctrine' || target === 'doctrine.name') e.applyPreset(String(value))
+    else if (target === 'layout.mode' || target === 'layout') e.cueLayoutId(String(value))
+    else if (target.startsWith('mod.')) e.fireModifier(target.slice(4), Number(value) || 0.8)
+  }
+
+  const loadTrack = async () => {
+    const res = await api.openAudio()
+    if (!res.ok || !res.bytes) return
+    const { duration, peaks } = await audio.loadBytes(res.bytes)
+    setTrack({ name: res.name ?? 'TRACK', duration, peaks })
+    setLyrics(res.lyrics ? parseLrc(res.lyrics) : [])
+    setTime(0)
+    setPlaying(false)
+    // Native analysis (python brain) feeds real sections/events into the engine;
+    // falls back to the live-FFT scheduler when no worker is present.
+    if (res.path) {
+      const analysis = await api.analyzeAudio(res.path)
+      if (analysis.ok && analysis.analysis) engineRef.current?.setAnalysis(analysis.analysis)
+    }
+  }
+
+  const linkArchive = async () => {
+    const res = await api.scanArchive()
+    if (res.ok && res.images?.length) {
+      await engineRef.current?.setManifest(res.images)
+      setArchiveCount(res.images.length)
+    }
+  }
+
+  const togglePlay = () => {
+    if (!track) return
+    const isPlaying = audio.toggle()
+    setPlaying(isPlaying)
+    if (isPlaying) engineRef.current?.run()
+    else engineRef.current?.halt()
+  }
+
+  const seek = (t: number) => {
+    audio.seek(t)
+    setTime(t)
+  }
+
   const saveProject = async () => {
     if (!project) return
-    await fetch(`${API_BASE}/api/project/save`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: project.name, project }),
-    })
+    await api.saveProject(project.name, project)
+  }
+
+  const openProject = async () => {
+    const result = await api.openProject()
+    if (result.ok && result.project) {
+      setProject(result.project)
+      setNodes(result.project.graph.nodes)
+      setEdges(result.project.graph.edges)
+    }
   }
 
   const requestExport = async () => {
-    await fetch(`${API_BASE}/api/export`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ project }),
-    })
+    if (!project) return
+    await api.exportProject(project)
   }
 
   if (!project) {
     return (
       <main className="boot">
-        <Sparkles size={18} />
+        <span className="boot__mark">†</span>
         <span>LOADING MAGDALENE</span>
       </main>
     )
   }
 
+  const trackName = track ? track.name.toUpperCase() : 'NO TRACK LOADED'
+
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand__mark">M</span>
-          <div>
-            <h1>MAGDALENE</h1>
-            <p>{project.name}</p>
-          </div>
+    <main className="shell">
+      <header className="masthead">
+        <h1 className="wordmark">
+          MAGDALENE<span className="wordmark__mark">†</span>
+        </h1>
+        <div className="masthead-meta">
+          <div className="meta-row">N° ENGINE &mdash; {serverStatus === 'ready' ? 'LIVE' : 'CHECK'}</div>
+          <div className="meta-row">N° TRACK &mdash; {trackName}</div>
+          <div className="meta-row">N° GRAPH &mdash; {nodes.length} NODES / {edges.length} LINKS</div>
+          <div className="meta-row">N° PROJECT &mdash; {project.name.toUpperCase()}</div>
         </div>
-        <div className="topbar__actions">
-          <button type="button" className="icon-btn" title="Open project">
-            <FolderOpen size={17} />
-          </button>
-          <button type="button" className="icon-btn" title="Save project" onClick={saveProject}>
-            <Save size={17} />
-          </button>
-          <button type="button" className="primary-btn" onClick={requestExport}>
-            <Download size={17} />
-            <span>Export</span>
-          </button>
-        </div>
+        <div className="masthead-stripe" />
       </header>
 
-      <section className="workbench">
-        <aside className="media-rail">
-          <div className="panel-heading">
-            <Boxes size={16} />
-            <span>Media</span>
+      <section className="body">
+        <aside className="panel media-panel">
+          <div className="panel-label">
+            <span>01 // MEDIA</span>
+            <span className="panel-label__actions">
+              <button type="button" className="ghost-btn" onClick={loadTrack}>LOAD TRACK</button>
+              <button type="button" className="ghost-btn" onClick={linkArchive}>ARCHIVE</button>
+              <button type="button" className="ghost-btn" onClick={openProject}>OPEN</button>
+            </span>
+          </div>
+          <div className="track-name">{trackName}</div>
+          <div className="track-name track-name--sub">
+            ARCHIVE &mdash; {archiveCount > 0 ? `${archiveCount} LINKED` : 'SAMPLE SET'}
           </div>
           <div className="media-list">
-            {project.media.map((item) => (
-              <button key={item.id} className="media-item" type="button">
-                {mediaIcon(item.type)}
-                <span>{item.name}</span>
-                <small>{item.status}</small>
+            {project.media.map((item, idx) => (
+              <button key={item.id} className="media-row" type="button">
+                <span className="media-row__index">{String(idx + 1).padStart(2, '0')}</span>
+                <span className="media-row__name">{item.name}</span>
+                <span className="media-row__meta">{item.type} &mdash; {item.status}</span>
               </button>
             ))}
           </div>
         </aside>
 
-        <section className="graph-panel">
-          <div className="panel-heading panel-heading--graph">
-            <GitBranch size={16} />
-            <span>Graph</span>
-            <strong>{nodes.length} nodes / {edges.length} links</strong>
-          </div>
-          <ReactFlow<MagdaleneFlowNode, Edge>
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={nodeTypes}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onNodeClick={(_, node) => setSelectedNodeId(node.id)}
-            fitView
-          >
-            <Background color="#3a352f" gap={28} size={1} />
-            <Controls showInteractive={false} />
-            <MiniMap pannable zoomable nodeStrokeWidth={3} />
-          </ReactFlow>
+        <section className="stage-region">
+          <section className="workrow">
+            <section className="center">
+              <section className={`stage${footage?.flash ? ' is-flashing' : ''}`}>
+                <PreviewCanvas
+                  audioSource={footageAudio}
+                  onReady={(e) => {
+                    engineRef.current = e
+                    e.setRuntime(runtimeRef.current, () => markersRef.current)
+                    e.setMode(graphMode ? 'driven' : 'auto')
+                  }}
+                  onState={setFootage}
+                />
+                <div className="stage-frame">
+                  <div className="stage-top">
+                    <span>PREVIEW / {playing ? 'RUNNING' : serverStatus === 'ready' ? 'LIVE' : 'CHECK'}</span>
+                    <span>FRAME {String(footage?.frame ?? 0).padStart(6, '0')}</span>
+                  </div>
+                  <div className="stage-bottom">
+                    <span>TIMELINE &mdash; {project.timeline.bpm} BPM</span>
+                    <span>STATE &mdash; {(footage?.musicState ?? 'INTRO').toUpperCase()}</span>
+                    <span>CUT &mdash; {footage?.transitionMode ?? '—'}</span>
+                    <span>EXPORT &mdash; IDLE</span>
+                  </div>
+                </div>
+                <StageLyrics lines={lyrics} time={time} />
+                <div className="stage-stripe" />
+                <div className="stage-actions">
+                  <button
+                    type="button"
+                    className={`stage-btn stage-btn--mode${graphMode ? ' is-on' : ''}`}
+                    onClick={toggleGraphMode}
+                    title="Toggle autonomous vs graph-driven"
+                  >
+                    {graphMode ? 'GRAPH' : 'AUTO'}
+                  </button>
+                  <button type="button" className="stage-btn" onClick={() => engineRef.current?.swapImage()}>
+                    SWAP
+                  </button>
+                  <button type="button" className="stage-btn" onClick={() => engineRef.current?.cueLayoutId('quad')}>
+                    QUAD
+                  </button>
+                  <button type="button" className="stage-btn" onClick={() => engineRef.current?.cueLayoutId('solo')}>
+                    SOLO
+                  </button>
+                  <button type="button" className="stage-btn" onClick={() => engineRef.current?.fireModifier('shatter', 0.9)}>
+                    SHATTER
+                  </button>
+                  <button type="button" className="stage-btn" onClick={() => engineRef.current?.applyPreset('rupture')}>
+                    DOCTRINE
+                  </button>
+                </div>
+              </section>
+
+              <section className="graph-panel">
+                <div className="panel-label panel-label--float">
+                  <span>02 // SYSTEM GRAPH</span>
+                  <strong>{nodes.length} NODES / {edges.length} LINKS</strong>
+                </div>
+                <ReactFlow<MagdaleneFlowNode, Edge>
+                  nodes={nodes}
+                  edges={edges}
+                  nodeTypes={nodeTypes}
+                  onNodesChange={onNodesChange}
+                  onEdgesChange={onEdgesChange}
+                  onConnect={onConnect}
+                  onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+                  onPaneClick={() => setSelectedNodeId(null)}
+                  fitView
+                >
+                  <Background color="#1a1a1a" gap={26} size={1} />
+                  <Controls showInteractive={false} />
+                  <MiniMap pannable zoomable nodeStrokeWidth={3} />
+                </ReactFlow>
+              </section>
+            </section>
+
+            <aside className="panel controls-panel">
+              <section className="ctrl-block">
+                <header className="ctrl-header">
+                  <span className="ctrl-num">N°01</span>
+                  <span className="ctrl-title">INSPECTOR</span>
+                  <span className="ctrl-status">{selectedNode ? 'NODE' : 'PROJECT'}</span>
+                </header>
+                {selectedNode ? (
+                  <div className="inspect">
+                    <h2 className="inspect__title">{selectedNode.data.label}</h2>
+                    <p className="inspect__sub">{selectedNode.data.subtitle}</p>
+                    {selectedEval && selectedEval.params.length ? (
+                      selectedEval.params.map((p) => {
+                        const cur = selectedNode.data.params?.[p.name] ?? p.default
+                        if (p.type === 'enum') {
+                          return (
+                            <label className="macro" key={p.name}>
+                              <span className="macro__top">
+                                <span>{p.name.toUpperCase()}</span>
+                                <span className="macro__value">{String(cur)}</span>
+                              </span>
+                              <select
+                                className="macro__select"
+                                value={String(cur)}
+                                onChange={(e) => setNodeParam(selectedNode.id, p.name, e.target.value)}
+                              >
+                                {(p.options ?? []).map((o) => (
+                                  <option key={o} value={o}>
+                                    {o}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )
+                        }
+                        if (p.type === 'boolean') {
+                          return (
+                            <label className="macro macro--bool" key={p.name}>
+                              <span>{p.name.toUpperCase()}</span>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(cur)}
+                                onChange={(e) => setNodeParam(selectedNode.id, p.name, e.target.checked)}
+                              />
+                            </label>
+                          )
+                        }
+                        return (
+                          <label className="macro" key={p.name}>
+                            <span className="macro__top">
+                              <span>{p.name.toUpperCase()}</span>
+                              <span className="macro__value">{Number(cur).toFixed(2)}</span>
+                            </span>
+                            <input
+                              type="range"
+                              min={p.min ?? 0}
+                              max={p.max ?? 1}
+                              step={p.step ?? 0.01}
+                              value={Number(cur)}
+                              onChange={(e) => setNodeParam(selectedNode.id, p.name, parseFloat(e.target.value))}
+                            />
+                          </label>
+                        )
+                      })
+                    ) : (
+                      <p className="inspect__sub">{selectedEval ? 'WIRING NODE — NO PARAMS' : 'COSMETIC NODE'}</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="inspect">
+                    <h2 className="inspect__title">{project.name}</h2>
+                    <p className="inspect__sub">
+                      {project.media.length} MEDIA SOURCES / {project.timeline.markers.length} MARKERS
+                    </p>
+                  </div>
+                )}
+              </section>
+
+              <section className="ctrl-block">
+                <header className="ctrl-header">
+                  <span className="ctrl-num">N°02</span>
+                  <span className="ctrl-title">LIBRARY</span>
+                  <span className="ctrl-status">NODES</span>
+                </header>
+                <div className="library-grid">
+                  {NODE_LIBRARY.map((ev, idx) => (
+                    <button key={ev.type} type="button" className="library-tile" title={ev.category}>
+                      <span className="library-tile__num">{String(idx + 1).padStart(2, '0')}</span>
+                      <span className="library-tile__name">{ev.label.toUpperCase()}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="ctrl-block">
+                <header className="ctrl-header">
+                  <span className="ctrl-num">N°03</span>
+                  <span className="ctrl-title">PROTOCOL</span>
+                  <span className="ctrl-status">{track ? 'ARMED' : 'NO TRACK'}</span>
+                </header>
+                <button type="button" className="run-btn" onClick={requestExport}>
+                  <span className="run-btn__glyph">▶</span>
+                  <span className="run-btn__text">EXPORT VIDEO</span>
+                </button>
+                <div className="secondary-actions">
+                  <button type="button" className="action-btn" onClick={saveProject}>
+                    <span className="action-btn__key">SAVE</span>
+                    <span className="action-btn__name">PROJECT</span>
+                  </button>
+                  <button type="button" className="action-btn">
+                    <span className="action-btn__key">REC</span>
+                    <span className="action-btn__name">CAPTURE</span>
+                  </button>
+                </div>
+                <div className="transport">
+                  <button
+                    type="button"
+                    className="transport__play"
+                    title={playing ? 'Pause' : 'Play'}
+                    onClick={togglePlay}
+                  >
+                    {playing ? '❚❚' : '▶'}
+                  </button>
+                  <span className="transport__time">{formatTime(time)}</span>
+                  <span className="transport__cue">{project.timeline.markers[0].label}</span>
+                </div>
+              </section>
+            </aside>
+          </section>
+
+          <Timeline
+            project={project}
+            track={track}
+            time={time}
+            onSeek={seek}
+            onMarkerMove={moveMarker}
+            onMarkerTrigger={triggerMarker}
+          />
         </section>
-
-        <aside className="inspector">
-          <div className="panel-heading">
-            <AudioLines size={16} />
-            <span>Inspector</span>
-          </div>
-          {selectedNode ? (
-            <div className="inspect-card">
-              <span className="inspect-card__eyebrow">NODE</span>
-              <h2>{selectedNode.data.label}</h2>
-              <p>{selectedNode.data.subtitle}</p>
-              <label>
-                Intensity
-                <input type="range" min="0" max="1" step="0.01" defaultValue="0.72" />
-              </label>
-              <label>
-                Reactivity
-                <input type="range" min="0" max="1" step="0.01" defaultValue="0.58" />
-              </label>
-            </div>
-          ) : (
-            <div className="inspect-card">
-              <span className="inspect-card__eyebrow">PROJECT</span>
-              <h2>{project.name}</h2>
-              <p>{project.media.length} media sources / {project.timeline.markers.length} markers</p>
-            </div>
-          )}
-          <div className="node-palette">
-            <span>Node Library</span>
-            {['Lyric Cue', 'Transition Map', 'Cell Layout', 'Datamosh', 'Render Output'].map((name) => (
-              <button key={name} type="button">{name}</button>
-            ))}
-          </div>
-        </aside>
       </section>
 
-      <section className="lower-deck">
-        <Preview project={project} serverStatus={serverStatus} />
-        <Timeline project={project} />
-        <div className="transport">
-          <button type="button" className="transport__play" title="Play">
-            <Play size={18} fill="currentColor" />
-          </button>
-          <span>00:24.000</span>
-          <span>{project.timeline.markers[0].label}</span>
-        </div>
-      </section>
+      <footer className="footer">
+        <div className="footer-block">N° 01 &mdash; {project.name.toUpperCase()}</div>
+        <div className="footer-block footer-block--center">EDIT WITH SOUND</div>
+        <div className="footer-block footer-block--right">RELEASE // 0.1.0 &mdash; NATIVE BUILD</div>
+      </footer>
     </main>
   )
 }

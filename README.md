@@ -26,6 +26,8 @@ Read:
 - [PLAN.md](PLAN.md) for the build direction
 - [CONTEXT.md](CONTEXT.md) for product positioning and relationship to FOUND /
   FOOTAGE
+- [MIGRATION.md](MIGRATION.md) for the engineering bridge: how every automatic
+  FOUND / FOOTAGE behavior becomes a scriptable, wireable node
 
 ## Run
 

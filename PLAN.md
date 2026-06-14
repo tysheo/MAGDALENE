@@ -40,6 +40,11 @@ The first real version should have five primary areas:
 The default project template should recreate the FOUND / FOOTAGE auto-maker
 behavior as a graph, so users start with something alive and can break it open.
 
+See [MIGRATION.md](MIGRATION.md) for the detailed engineering bridge: a full
+decomposition of FOUND / FOOTAGE's automatic render loop, the per-frame
+RenderState contract, the typed-port interlock system, and the
+node-by-node mapping from each automatic behavior to its scriptable node.
+
 ## Core Architecture
 
 MAGDALENE should be organized around a graph runtime, not around a hidden global

@@ -30,6 +30,10 @@ export type MagdaleneNodeData = {
   label: string
   subtitle: string
   tone: 'red' | 'amber' | 'moss' | 'bone' | 'violet'
+  // evaluator id in the graph runtime (engine/runtime registry). Cosmetic-only
+  // nodes leave this undefined.
+  nodeType?: string
+  params?: Record<string, number | string | boolean>
 }
 
 export type MagdaleneFlowNode = Node<MagdaleneNodeData, 'magdalene'>
